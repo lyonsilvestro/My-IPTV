@@ -16,7 +16,8 @@ import {
   Heart,
   Radio,
   Clock,
-  Layers
+  Layers,
+  PictureInPicture2
 } from 'lucide-react';
 import { ChannelWithEpg, TranscodeProfile } from '../types/iptv.ts';
 import { apiUrl } from '../lib/api.ts';
@@ -48,6 +49,96 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoadingStream, setIsLoadingStream] = useState<boolean>(false);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
+
+  // Picture-in-Picture State
+  const [isPipActive, setIsPipActive] = useState<boolean>(false);
+  const [isPipSupported, setIsPipSupported] = useState<boolean>(false);
+
+  // Wake Lock Ref (Screen keep awake during streaming)
+  const wakeLockRef = useRef<any>(null);
+  // Auto-reconnect retry counter
+  const retryCountRef = useRef<number>(0);
+  const maxRetries = 3;
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      setIsPipSupported(Boolean((document as any).pictureInPictureEnabled));
+    }
+  }, []);
+
+  // Screen Wake Lock API to prevent phone screen from locking while watching
+  const acquireWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator && (navigator as any).wakeLock) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      }
+    } catch {
+      // Browser or battery saver may reject wake lock request
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (isPlaying && channel) {
+      acquireWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+    return () => {
+      releaseWakeLock();
+    };
+  }, [isPlaying, channel]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && isPlaying && channel) {
+        acquireWakeLock();
+      } else {
+        releaseWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [isPlaying, channel]);
+
+  // Picture-in-Picture Toggle
+  const togglePip = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      if ((document as any).pictureInPictureElement) {
+        await (document as any).exitPictureInPicture();
+      } else if ((document as any).pictureInPictureEnabled) {
+        await (video as any).requestPictureInPicture();
+      }
+    } catch (err) {
+      console.warn('PiP error:', err);
+    }
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const onEnterPip = () => setIsPipActive(true);
+    const onLeavePip = () => setIsPipActive(false);
+    video.addEventListener('enterpictureinpicture', onEnterPip);
+    video.addEventListener('leavepictureinpicture', onLeavePip);
+    return () => {
+      video.removeEventListener('enterpictureinpicture', onEnterPip);
+      video.removeEventListener('leavepictureinpicture', onLeavePip);
+    };
+  }, []);
 
   // Stop previous HLS instance safely
   const destroyHls = () => {
@@ -144,6 +235,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsLoadingStream(false);
+        retryCountRef.current = 0;
+        setErrorMsg(null);
         video
           .play()
           .then(() => setIsPlaying(true))
@@ -155,11 +248,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              if (data.response?.code === 502 || data.response?.code === 404) {
-                setErrorMsg('Luồng stream tạm thời ngoại tuyến hoặc không phản hồi từ máy chủ nguồn. Bạn có thể thử chuyển mã hoặc chọn kênh khác.');
+              if (retryCountRef.current < maxRetries) {
+                retryCountRef.current += 1;
+                const delay = retryCountRef.current * 2000;
+                setErrorMsg(`Mất tín hiệu tạm thời. Tự động kết nối lại lần ${retryCountRef.current}/${maxRetries}...`);
+                setIsLoadingStream(true);
+                setTimeout(() => {
+                  if (hlsRef.current) {
+                    hlsRef.current.startLoad();
+                  }
+                }, delay);
               } else {
-                setErrorMsg('Lỗi kết nối mạng đến luồng phát (Network Error).');
-                hls.startLoad();
+                setErrorMsg('Luồng stream tạm thời ngoại tuyến từ nguồn phát. Bạn có thể chọn kênh khác hoặc thử chuyển mã FFmpeg.');
+                setIsLoadingStream(false);
               }
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
@@ -169,9 +270,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             default:
               setErrorMsg('Không thể phát luồng này trực tiếp (Manifest Load Error). Bạn có thể thử chuyển mã FFmpeg hoặc mở bằng VLC.');
               destroyHls();
+              setIsLoadingStream(false);
               break;
           }
-          setIsLoadingStream(false);
         }
       });
     } else {
@@ -366,8 +467,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               min="0"
               max="1"
               step="0.05"
-              value={isMuted ? 0 : volume}
-              onChange={e => handleVolumeChange(parseFloat(e.target.value))}
+              value={isMuted ? 0 : (volume ?? 1)}
+              onChange={e => handleVolumeChange(parseFloat(e.target.value) || 0)}
               className="w-20 accent-emerald-500 cursor-pointer hidden sm:block"
             />
           </div>
@@ -385,15 +486,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             <button
               onClick={handleRetryStream}
-              className="p-1.5 rounded-lg text-white hover:text-emerald-400 hover:bg-white/10 transition-colors"
+              className="p-2 sm:p-1.5 rounded-lg text-white hover:text-emerald-400 hover:bg-white/10 transition-colors"
               title="Làm mới luồng"
             >
               <RotateCw className="w-4 h-4" />
             </button>
 
+            {isPipSupported && (
+              <button
+                onClick={togglePip}
+                className={`p-2 sm:p-1.5 rounded-lg text-white hover:text-emerald-400 hover:bg-white/10 transition-colors ${
+                  isPipActive ? 'text-emerald-400 bg-white/10' : ''
+                }`}
+                title={isPipActive ? 'Đóng cửa sổ nổi (PiP)' : 'Mở cửa sổ nổi (Picture-in-Picture)'}
+              >
+                <PictureInPicture2 className="w-4 h-4" />
+              </button>
+            )}
+
             <button
               onClick={toggleFullscreen}
-              className="p-1.5 rounded-lg text-white hover:text-emerald-400 hover:bg-white/10 transition-colors"
+              className="p-2 sm:p-1.5 rounded-lg text-white hover:text-emerald-400 hover:bg-white/10 transition-colors"
             >
               {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
             </button>

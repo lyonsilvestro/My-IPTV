@@ -1,5 +1,5 @@
-import React from 'react';
-import { Heart, Play, Radio, ExternalLink } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Heart, Play, Radio, ExternalLink, ChevronDown } from 'lucide-react';
 import { ChannelWithEpg } from '../types/iptv.ts';
 
 interface ChannelListProps {
@@ -11,6 +11,9 @@ interface ChannelListProps {
   isLoading?: boolean;
 }
 
+const INITIAL_PAGE_SIZE = 60;
+const PAGE_INCREMENT = 40;
+
 export const ChannelList: React.FC<ChannelListProps> = ({
   channels,
   activeChannel,
@@ -19,6 +22,13 @@ export const ChannelList: React.FC<ChannelListProps> = ({
   onOpenExternalModal,
   isLoading
 }) => {
+  const [displayCount, setDisplayCount] = useState<number>(INITIAL_PAGE_SIZE);
+
+  // Reset pagination window when channel source list changes
+  useEffect(() => {
+    setDisplayCount(INITIAL_PAGE_SIZE);
+  }, [channels]);
+
   if (isLoading) {
     return (
       <div className="flex-1 p-6 flex flex-col items-center justify-center text-zinc-400 space-y-3">
@@ -40,9 +50,23 @@ export const ChannelList: React.FC<ChannelListProps> = ({
     );
   }
 
+  const visibleChannels = channels.slice(0, displayCount);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight < 400) {
+      if (displayCount < channels.length) {
+        setDisplayCount(prev => Math.min(prev + PAGE_INCREMENT, channels.length));
+      }
+    }
+  };
+
   return (
-    <div className="flex-1 overflow-y-auto p-2 sm:p-3 space-y-1.5 scrollbar-thin scrollbar-thumb-zinc-700">
-      {channels.map(channel => {
+    <div
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto p-2 sm:p-3 space-y-1.5 scrollbar-thin scrollbar-thumb-zinc-700 select-none"
+    >
+      {visibleChannels.map(channel => {
         const isActive = activeChannel?.id === channel.id;
         return (
           <div
@@ -62,14 +86,14 @@ export const ChannelList: React.FC<ChannelListProps> = ({
                   <img
                     src={channel.logo}
                     alt={channel.name}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-contain p-1"
                     onError={e => {
-                      // Hide failed image and display initials fallback
                       (e.target as HTMLElement).style.display = 'none';
                     }}
                   />
                 ) : null}
-                {/* Fallback initials if image fails or missing */}
                 <span className="text-xs font-bold text-zinc-400 uppercase select-none">
                   {channel.name.substring(0, 2)}
                 </span>
@@ -81,56 +105,71 @@ export const ChannelList: React.FC<ChannelListProps> = ({
                 )}
               </div>
 
-              {/* Title & Group & EPG */}
+              {/* Title & EPG / Group */}
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <h4 className="text-xs sm:text-sm font-semibold truncate leading-tight">{channel.name}</h4>
-                  <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 border border-zinc-700/60 flex-shrink-0">
-                    {channel.group || 'Chung'}
-                  </span>
+                  {channel.group && (
+                    <span className="hidden sm:inline-block text-[10px] px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 flex-shrink-0 truncate max-w-[100px]">
+                      {channel.group}
+                    </span>
+                  )}
                 </div>
 
-                {/* EPG Now playing indicator */}
-                {channel.nowPlaying ? (
-                  <div className="text-[11px] text-amber-300 truncate mt-0.5 flex items-center gap-1 font-medium">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
-                    <span className="truncate">Đang phát: {channel.nowPlaying.title}</span>
-                  </div>
-                ) : (
-                  <div className="text-[11px] text-zinc-500 truncate mt-0.5">
-                    {channel.tvgId ? `ID: ${channel.tvgId}` : 'Luồng trực tiếp (Live)'}
-                  </div>
-                )}
+                {/* EPG Info (Now Playing) */}
+                <div className="text-[11px] text-zinc-400 truncate mt-0.5">
+                  {channel.nowPlaying ? (
+                    <span className="text-emerald-400 truncate flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block flex-shrink-0" />
+                      <span className="truncate">{channel.nowPlaying.title}</span>
+                    </span>
+                  ) : (
+                    <span className="text-zinc-500 truncate">{channel.group || 'Live TV'}</span>
+                  )}
+                </div>
               </div>
             </div>
 
-            {/* Right: Actions */}
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              {/* External link / Nokia helper button */}
-              <button
-                onClick={e => onOpenExternalModal(channel, e)}
-                className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-                title="Mở trong VLC / CorePlayer / Nokia E72"
-              >
-                <ExternalLink className="w-4 h-4" />
-              </button>
-
-              {/* Favorite Button */}
+            {/* Right: Touch Friendly Action Buttons */}
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {/* Favorite Button (Minimum 44px hit-box on mobile) */}
               <button
                 onClick={e => onToggleFavorite(channel.id, e)}
-                className={`p-1.5 rounded-lg transition-colors ${
+                className={`p-2.5 sm:p-1.5 rounded-lg transition-colors cursor-pointer ${
                   channel.isFavorite
                     ? 'text-rose-500 hover:text-rose-400'
-                    : 'text-zinc-500 hover:text-rose-400 hover:bg-zinc-800'
+                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800'
                 }`}
                 title={channel.isFavorite ? 'Bỏ yêu thích' : 'Thêm vào yêu thích'}
               >
                 <Heart className={`w-4 h-4 ${channel.isFavorite ? 'fill-rose-500' : ''}`} />
               </button>
+
+              {/* External / VLC / E72 Button */}
+              <button
+                onClick={e => onOpenExternalModal(channel, e)}
+                className="p-2.5 sm:p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors cursor-pointer"
+                title="Mở ngoài (VLC, Nokia E72, CorePlayer)"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
         );
       })}
+
+      {/* Infinite Scroll Indicator & Load More */}
+      {displayCount < channels.length && (
+        <div className="p-3 text-center">
+          <button
+            onClick={() => setDisplayCount(prev => Math.min(prev + PAGE_INCREMENT, channels.length))}
+            className="w-full py-2 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <span>Đang hiển thị {displayCount} / {channels.length} kênh (Bấm hoặc Cuộn để xem tiếp)</span>
+            <ChevronDown className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

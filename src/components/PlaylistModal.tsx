@@ -13,7 +13,8 @@ import {
   Unlock,
   Shield,
   Layers,
-  Info
+  Info,
+  Database
 } from 'lucide-react';
 import { Playlist } from '../types/iptv.ts';
 import { apiUrl } from '../lib/api.ts';
@@ -30,13 +31,24 @@ interface PlaylistModalProps {
   playlists: Playlist[];
   onRefreshPlaylists: () => void;
   onSelectPlaylist?: (playlistId: string) => void;
+  onOpenAdmin?: () => void;
+}
+
+async function parseJsonSafely(resp: Response): Promise<any> {
+  const text = await resp.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return { error: `Phản hồi máy chủ (HTTP ${resp.status}) không đúng định dạng JSON.` };
+  }
 }
 
 export const PlaylistModal: React.FC<PlaylistModalProps> = ({
   isOpen,
   onClose,
   playlists,
-  onRefreshPlaylists
+  onRefreshPlaylists,
+  onOpenAdmin
 }) => {
   const [isAdmin, setIsAdmin] = useState(false);
   const [activeTab, setActiveTab] = useState<'url' | 'upload'>('url');
@@ -52,6 +64,8 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
 
   const [isLoading, setIsLoading] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -117,7 +131,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
         body: JSON.stringify({ name: playlistName.trim(), url: playlistUrl.trim() })
       });
 
-      const data = await resp.json();
+      const data = await parseJsonSafely(resp);
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to import playlist');
       }
@@ -158,7 +172,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
         body: formData
       });
 
-      const data = await resp.json();
+      const data = await parseJsonSafely(resp);
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to upload playlist');
       }
@@ -179,11 +193,11 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
     try {
       setRefreshingId(playlistId);
       setErrorMsg(null);
-      const resp = await fetch(apiUrl(`/api/playlists/${playlistId}/refresh`), {
+      const resp = await fetch(apiUrl(`/api/playlists/${encodeURIComponent(playlistId)}/refresh`), {
         method: 'POST',
         headers: { ...getAuthHeaders() }
       });
-      const data = await resp.json();
+      const data = await parseJsonSafely(resp);
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to refresh playlist');
       }
@@ -199,12 +213,12 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
 
   const handleToggleActive = async (playlistId: string) => {
     try {
-      const resp = await fetch(apiUrl(`/api/playlists/${playlistId}/toggle`), {
+      const resp = await fetch(apiUrl(`/api/playlists/${encodeURIComponent(playlistId)}/toggle`), {
         method: 'POST',
         headers: { ...getAuthHeaders() }
       });
+      const data = await parseJsonSafely(resp);
       if (!resp.ok) {
-        const data = await resp.json();
         throw new Error(data.error || 'Failed to toggle playlist');
       }
       onRefreshPlaylists();
@@ -214,22 +228,46 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
     }
   };
 
-  const handleDelete = async (playlistId: string, name: string) => {
-    if (!confirm(`Bạn có chắc muốn xóa playlist "${name}" khỏi toàn bộ hệ thống không?`)) return;
+  const executeDelete = async (playlistId: string, name: string) => {
     try {
-      const resp = await fetch(apiUrl(`/api/playlists/${playlistId}`), {
+      setDeletingId(playlistId);
+      setErrorMsg(null);
+
+      const cleanId = encodeURIComponent(playlistId);
+      // Try DELETE first, then fallback to POST /delete
+      let resp = await fetch(apiUrl(`/api/playlists/${cleanId}`), {
         method: 'DELETE',
         headers: { ...getAuthHeaders() }
       });
-      if (!resp.ok) {
-        const data = await resp.json();
-        throw new Error(data.error || 'Failed to delete playlist');
+
+      // If DELETE returned 404 or 405 (some proxies or environments block HTTP DELETE), try POST
+      if (!resp.ok && (resp.status === 404 || resp.status === 405)) {
+        resp = await fetch(apiUrl(`/api/playlists/${cleanId}/delete`), {
+          method: 'POST',
+          headers: { ...getAuthHeaders() }
+        });
       }
+
+      const data = await parseJsonSafely(resp);
+
+      if (!resp.ok) {
+        if (resp.status === 403 || resp.status === 401) {
+          clearAdminSession();
+          setIsAdmin(false);
+          setShowLoginForm(true);
+          throw new Error('Phiên đăng nhập Quản trị viên đã hết hạn hoặc chưa đăng nhập. Vui lòng đăng nhập lại Admin.');
+        }
+        throw new Error(data.error || `Lỗi khi xóa playlist (HTTP ${resp.status})`);
+      }
+
       setSuccessMsg(`Đã xóa playlist "${name}" thành công.`);
+      setConfirmingDeleteId(null);
       onRefreshPlaylists();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(msg);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -266,6 +304,16 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {isAdmin && onOpenAdmin && (
+              <button
+                onClick={onOpenAdmin}
+                className="text-xs text-purple-300 hover:text-white px-2.5 py-1 rounded bg-purple-950/70 border border-purple-800/80 hover:bg-purple-900 transition-colors flex items-center gap-1 font-semibold cursor-pointer"
+                title="Mở Quản trị Sao lưu & Khôi phục Cơ sở dữ liệu"
+              >
+                <Database className="w-3.5 h-3.5 text-purple-400" />
+                <span className="hidden sm:inline">Sao lưu / Khôi phục DB</span>
+              </button>
+            )}
             {isAdmin ? (
               <button
                 onClick={handleAdminLogout}
@@ -328,7 +376,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                   <label className="block text-[11px] text-zinc-400 mb-0.5">Tài khoản</label>
                   <input
                     type="text"
-                    value={adminUser}
+                    value={adminUser ?? ''}
                     onChange={e => setAdminUser(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-purple-500"
                   />
@@ -337,7 +385,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                   <label className="block text-[11px] text-zinc-400 mb-0.5">Mật khẩu</label>
                   <input
                     type="password"
-                    value={adminPass}
+                    value={adminPass ?? ''}
                     onChange={e => setAdminPass(e.target.value)}
                     placeholder="Nhập mật khẩu admin..."
                     className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-purple-500"
@@ -401,7 +449,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                     <label className="block text-xs font-medium text-zinc-300 mb-1">Tên Playlist</label>
                     <input
                       type="text"
-                      value={playlistName}
+                      value={playlistName ?? ''}
                       onChange={e => setPlaylistName(e.target.value)}
                       placeholder="Ví dụ: Kênh Quốc Tế Mới"
                       className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
@@ -412,7 +460,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                     <label className="block text-xs font-medium text-zinc-300 mb-1">URL M3U / M3U8</label>
                     <input
                       type="url"
-                      value={playlistUrl}
+                      value={playlistUrl ?? ''}
                       onChange={e => setPlaylistUrl(e.target.value)}
                       placeholder="https://example.com/playlist.m3u"
                       className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
@@ -467,7 +515,7 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                     <label className="block text-xs font-medium text-zinc-300 mb-1">Tên Playlist</label>
                     <input
                       type="text"
-                      value={playlistName}
+                      value={playlistName ?? ''}
                       onChange={e => setPlaylistName(e.target.value)}
                       placeholder="Đặt tên danh sách tải lên..."
                       className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
@@ -565,14 +613,44 @@ export const PlaylistModal: React.FC<PlaylistModalProps> = ({
                             </button>
                           )}
 
-                          {/* Delete Button */}
-                          <button
-                            onClick={() => handleDelete(pl.id, pl.name)}
-                            className="p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 transition-colors"
-                            title="Xóa playlist khỏi toàn bộ hệ thống"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {/* Delete Button with inline confirmation (no window.confirm block) */}
+                          {confirmingDeleteId === pl.id ? (
+                            <div className="flex items-center gap-1.5 bg-rose-950/95 border border-rose-700/80 px-2 py-1 rounded-lg shadow-lg animate-in fade-in">
+                              <span className="text-[11px] text-rose-200 font-semibold whitespace-nowrap">
+                                Xóa?
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => executeDelete(pl.id, pl.name)}
+                                disabled={deletingId === pl.id}
+                                className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-colors flex items-center gap-1 shadow-xs cursor-pointer"
+                                title="Xác nhận xóa vĩnh viễn"
+                              >
+                                {deletingId === pl.id ? (
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3 h-3" />
+                                )}
+                                <span>{deletingId === pl.id ? 'Đang xóa...' : 'Xóa ngay'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmingDeleteId(null)}
+                                className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-colors cursor-pointer"
+                              >
+                                Hủy
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmingDeleteId(pl.id)}
+                              className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-400 hover:bg-rose-950/40 border border-transparent hover:border-rose-900/50 transition-colors cursor-pointer"
+                              title="Xóa playlist này khỏi hệ thống"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </>
                       ) : (
                         <span

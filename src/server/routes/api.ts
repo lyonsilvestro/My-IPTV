@@ -13,14 +13,20 @@ import { logger } from '../logger.ts';
 import { config } from '../config.ts';
 import { sanitizePath, validateStreamUrl } from '../security.ts';
 import { Playlist, TranscodeProfile } from '../../types/iptv.ts';
+import crypto from 'crypto';
 
 const router = Router();
 const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB max playlist
 });
 
-// Admin authentication state
+// Admin authentication state & token hashing
 const validAdminTokens = new Set<string>();
+
+export function getAdminTokenSignature(): string {
+  const data = `admin:${config.adminPassword}:${config.sessionSecret}`;
+  return `adm_${crypto.createHash('sha256').update(data).digest('hex').substring(0, 24)}`;
+}
 
 export function requireAdminAuth(req: Request, res: Response, next: () => void) {
   const authHeader = req.headers['authorization'] || req.headers['x-admin-token'];
@@ -29,9 +35,12 @@ export function requireAdminAuth(req: Request, res: Response, next: () => void) 
     token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
   }
 
-  if (!token || !validAdminTokens.has(token)) {
+  const expectedSignature = getAdminTokenSignature();
+  const isValid = Boolean(token && (token === expectedSignature || validAdminTokens.has(token)));
+
+  if (!isValid) {
     res.status(403).json({
-      error: 'Quyền bị từ chối: Chỉ Quản trị viên (Admin) mới có quyền thêm, xóa hoặc cập nhật danh sách kênh hệ thống.'
+      error: 'Quyền bị từ chối: Phiên làm việc của Quản trị viên đã hết hạn hoặc chưa đăng nhập. Vui lòng đăng nhập lại Admin.'
     });
     return;
   }
@@ -320,17 +329,26 @@ router.post('/playlists/:id/toggle', requireAdminAuth, async (req: Request, res:
   }
 });
 
-// Delete playlist
-router.delete('/playlists/:id', requireAdminAuth, async (req: Request, res: Response) => {
+// Delete playlist (support both DELETE and POST for firewall/proxy compatibility)
+const handleDeletePlaylist = async (req: Request, res: Response) => {
   try {
-    await dbService.deletePlaylist(req.params.id);
-    logger.info(`Deleted playlist: ${req.params.id}`);
-    res.json({ success: true, deletedId: req.params.id });
+    const id = req.params.id;
+    if (!id) {
+      res.status(400).json({ error: 'Mã playlist không hợp lệ.' });
+      return;
+    }
+    await dbService.deletePlaylist(id);
+    logger.info(`Deleted playlist: ${id}`);
+    res.json({ success: true, deletedId: id });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    logger.error('Error deleting playlist', { error: message });
     res.status(500).json({ error: message });
   }
-});
+};
+
+router.delete('/playlists/:id', requireAdminAuth, handleDeletePlaylist);
+router.post('/playlists/:id/delete', requireAdminAuth, handleDeletePlaylist);
 
 // EPG API
 router.post('/epg/fetch', requireAdminAuth, async (req: Request, res: Response) => {
@@ -559,8 +577,8 @@ router.get('/transcode/live/:channelId/:profile.ts', async (req: Request, res: R
 router.post('/admin/login', (req: Request, res: Response) => {
   const { username, password } = req.body;
   if (username === config.adminUsername && password === config.adminPassword) {
-    // Generate secure session token and register
-    const token = `adm_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    // Generate secure deterministic session token
+    const token = getAdminTokenSignature();
     validAdminTokens.add(token);
     logger.info(`Admin logged in successfully: ${username}`);
     res.json({ success: true, token, username });
@@ -576,7 +594,8 @@ router.get('/admin/verify', (req: Request, res: Response) => {
   if (typeof authHeader === 'string') {
     token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
   }
-  if (token && validAdminTokens.has(token)) {
+  const expectedSignature = getAdminTokenSignature();
+  if (token && (token === expectedSignature || validAdminTokens.has(token))) {
     res.json({ authenticated: true, username: config.adminUsername });
   } else {
     res.json({ authenticated: false });
@@ -608,6 +627,7 @@ router.get('/admin/metrics', async (req: Request, res: Response) => {
 
     const stats = await dbService.getStats();
     const sessions = transcodeManager.getActiveSessions();
+    const dbFileInfo = dbService.getDbFileInfo();
 
     res.json({
       cpuUsage,
@@ -619,6 +639,8 @@ router.get('/admin/metrics', async (req: Request, res: Response) => {
       activeTranscodeSessions: sessions.length,
       totalPlaylists: stats.playlistCount,
       totalChannels: stats.channelCount,
+      dbFileSizeKb: Math.round(dbFileInfo.sizeBytes / 1024),
+      dbLastModified: dbFileInfo.lastModified,
       ffmpegAvailable: true
     });
   } catch (err: unknown) {
@@ -630,6 +652,97 @@ router.get('/admin/metrics', async (req: Request, res: Response) => {
 router.get('/admin/logs', (req: Request, res: Response) => {
   const limit = parseInt((req.query.limit as string) || '100', 10);
   res.json(logger.getLogs(limit));
+});
+
+// Admin Backup & Restore Endpoints
+router.get('/admin/backup', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const backupData = await dbService.exportBackupData();
+    const dateStr = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="iptv-backup-${dateStr}.json"`);
+    res.send(JSON.stringify(backupData, null, 2));
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('Error generating backup', { error: message });
+    res.status(500).json({ error: message });
+  }
+});
+
+router.get('/admin/backup/db', requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const buf = await dbService.getRawDbBuffer();
+    if (!buf) {
+      res.status(500).json({ error: 'Không thể xuất file SQLite.' });
+      return;
+    }
+    const dateStr = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'application/x-sqlite3');
+    res.setHeader('Content-Disposition', `attachment; filename="iptv-${dateStr}.db"`);
+    res.send(buf);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('Error generating binary DB backup', { error: message });
+    res.status(500).json({ error: message });
+  }
+});
+
+router.post('/admin/restore', requireAdminAuth, upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (req.file) {
+      // Check if file is raw SQLite binary file
+      const headerStr = req.file.buffer.slice(0, 16).toString('utf8');
+      if (headerStr.startsWith('SQLite format 3') || req.file.originalname?.endsWith('.db')) {
+        const result = await dbService.restoreRawDbBuffer(req.file.buffer);
+        logger.info(`Database restored successfully from SQLite binary: ${result.playlistsRestored} playlists, ${result.channelsRestored} channels.`);
+        res.json({
+          success: true,
+          playlistsRestored: result.playlistsRestored,
+          channelsRestored: result.channelsRestored,
+          format: 'sqlite'
+        });
+        return;
+      }
+
+      // Otherwise parse as JSON backup
+      const content = req.file.buffer.toString('utf8');
+      const backupJson = JSON.parse(content);
+      const result = await dbService.restoreBackupData(backupJson);
+      logger.info(`Database restored successfully from JSON file: ${result.playlistsRestored} playlists, ${result.channelsRestored} channels.`);
+      res.json({
+        success: true,
+        playlistsRestored: result.playlistsRestored,
+        channelsRestored: result.channelsRestored,
+        format: 'json'
+      });
+      return;
+    }
+
+    let backupJson: any = null;
+    if (req.body && req.body.backup) {
+      backupJson = typeof req.body.backup === 'string' ? JSON.parse(req.body.backup) : req.body.backup;
+    } else if (req.body && req.body.playlists) {
+      backupJson = req.body;
+    }
+
+    if (!backupJson) {
+      res.status(400).json({ error: 'Vui lòng cung cấp file sao lưu (.json hoặc .db) hợp lệ.' });
+      return;
+    }
+
+    const result = await dbService.restoreBackupData(backupJson);
+    logger.info(`Database restored successfully from JSON payload: ${result.playlistsRestored} playlists, ${result.channelsRestored} channels.`);
+    res.json({
+      success: true,
+      playlistsRestored: result.playlistsRestored,
+      channelsRestored: result.channelsRestored,
+      format: 'json'
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('Error restoring backup', { error: message });
+    res.status(500).json({ error: message });
+  }
 });
 
 export default router;

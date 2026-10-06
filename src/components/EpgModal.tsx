@@ -146,7 +146,7 @@ export const EpgModal: React.FC<EpgModalProps> = ({ isOpen, onClose, onRefreshCh
                 <label className="block text-xs font-medium text-zinc-300 mb-1">URL XMLTV</label>
                 <input
                   type="url"
-                  value={xmltvUrl}
+                  value={xmltvUrl ?? ''}
                   onChange={e => setXmltvUrl(e.target.value)}
                   placeholder="https://example.com/epg/guide.xml"
                   className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-blue-500"

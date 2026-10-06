@@ -41,6 +41,7 @@ export default function App() {
   const [isLoadingChannels, setIsLoadingChannels] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState<boolean>(false);
+  const [mobileTab, setMobileTab] = useState<'channels' | 'groups'>('channels');
 
   // Modals state
   const [isPlaylistModalOpen, setIsPlaylistModalOpen] = useState<boolean>(false);
@@ -192,37 +193,122 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Mobile Sidebar Toggle Button */}
-        <button
-          onClick={() => setIsSidebarOpenMobile(!isSidebarOpenMobile)}
-          className="md:hidden absolute bottom-4 left-4 z-40 p-3 rounded-full bg-emerald-600 text-white shadow-xl shadow-black/50"
-          title="Mở danh mục nhóm"
-        >
-          {isSidebarOpenMobile ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-        </button>
-
-        {/* Left Column: Groups Sidebar */}
-        <div
-          className={`fixed inset-y-0 left-0 z-30 md:static md:z-auto transition-transform duration-300 md:translate-x-0 ${
-            isSidebarOpenMobile ? 'translate-x-0' : '-translate-x-full'
-          }`}
-        >
-          <Sidebar
-            groups={groups}
-            selectedGroup={selectedGroup}
-            onSelectGroup={grp => {
-              setSelectedGroup(grp);
-              setActiveView('live');
-              setIsSidebarOpenMobile(false);
-            }}
-            totalChannelsCount={totalChannelsCount}
-            favoritesCount={favoritesCount}
+      {/* 1. Mobile Adaptive Layout (< md): Video pinned at top, channels and groups underneath */}
+      <div className="flex md:hidden flex-col flex-1 overflow-hidden relative">
+        {/* Pinned Video Player at top (Aspect 16:9) */}
+        <div className="w-full bg-black aspect-video flex-shrink-0 z-20 shadow-md border-b border-zinc-800">
+          <VideoPlayer
+            channel={activeChannel}
+            onToggleFavorite={handleToggleFavorite}
+            onOpenExternalModal={ch => setExternalModalChannel(ch)}
           />
         </div>
 
+        {/* Mobile Navigation Tabs Underneath Video */}
+        <div className="flex border-b border-zinc-800 bg-zinc-950 p-1.5 gap-1.5 flex-shrink-0">
+          <button
+            onClick={() => setMobileTab('channels')}
+            className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              mobileTab === 'channels'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'text-zinc-400 hover:text-white bg-zinc-900/60'
+            }`}
+          >
+            <span>📺 Kênh ({channels.length})</span>
+          </button>
+          <button
+            onClick={() => setMobileTab('groups')}
+            className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              mobileTab === 'groups'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'text-zinc-400 hover:text-white bg-zinc-900/60'
+            }`}
+          >
+            <span>📂 Nhóm ({groups.length})</span>
+          </button>
+        </div>
+
+        {/* Mobile Tab Content */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-zinc-900/40">
+          {mobileTab === 'channels' ? (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="px-3 py-2 border-b border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400 bg-zinc-900/80">
+                <span className="font-semibold text-emerald-400 truncate">
+                  {activeView === 'favorites' ? '⭐ Kênh yêu thích' : selectedGroup === 'All' ? 'Tất cả kênh' : selectedGroup}
+                </span>
+                <span className="text-[11px] text-zinc-500 font-mono">({channels.length})</span>
+              </div>
+              <ChannelList
+                channels={channels}
+                activeChannel={activeChannel}
+                onSelectChannel={ch => setActiveChannel(ch)}
+                onToggleFavorite={handleToggleFavorite}
+                onOpenExternalModal={(ch, e) => {
+                  e.stopPropagation();
+                  setExternalModalChannel(ch);
+                }}
+                isLoading={isLoadingChannels}
+              />
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2">Chọn nhóm kênh</h4>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedGroup('All');
+                    setActiveView('live');
+                    setMobileTab('channels');
+                  }}
+                  className={`p-3 rounded-xl border text-left text-xs font-semibold transition-colors cursor-pointer ${
+                    selectedGroup === 'All'
+                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:bg-zinc-800'
+                  }`}
+                >
+                  <p className="font-bold">Tất cả kênh</p>
+                  <p className="text-[10px] text-zinc-400 mt-0.5">{totalChannelsCount} kênh</p>
+                </button>
+                {groups.map(g => (
+                  <button
+                    key={g.name}
+                    onClick={() => {
+                      setSelectedGroup(g.name);
+                      setActiveView('live');
+                      setMobileTab('channels');
+                    }}
+                    className={`p-3 rounded-xl border text-left text-xs font-semibold transition-colors cursor-pointer ${
+                      selectedGroup === g.name
+                        ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-300 hover:bg-zinc-800'
+                    }`}
+                  >
+                    <p className="font-bold truncate">{g.name}</p>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">{g.count} kênh</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Desktop Standard 3-Column Layout (md:flex) */}
+      <div className="hidden md:flex flex-1 overflow-hidden relative">
+        {/* Left Column: Groups Sidebar */}
+        <Sidebar
+          groups={groups}
+          selectedGroup={selectedGroup}
+          onSelectGroup={grp => {
+            setSelectedGroup(grp);
+            setActiveView('live');
+          }}
+          totalChannelsCount={totalChannelsCount}
+          favoritesCount={favoritesCount}
+        />
+
         {/* Middle Column: Channel List */}
-        <div className="w-full md:w-80 lg:w-96 flex flex-col border-r border-zinc-800 bg-zinc-900/60 overflow-hidden h-full flex-shrink-0">
+        <div className="w-80 lg:w-96 flex flex-col border-r border-zinc-800 bg-zinc-900/60 overflow-hidden h-full flex-shrink-0">
           <div className="p-3 border-b border-zinc-800 flex items-center justify-between text-xs font-semibold text-zinc-400 uppercase tracking-wider">
             <span className="truncate">
               {activeView === 'favorites'
@@ -264,7 +350,11 @@ export default function App() {
         isOpen={isPlaylistModalOpen}
         onClose={() => setIsPlaylistModalOpen(false)}
         playlists={playlists}
-        onRefreshPlaylists={fetchMetadata}
+        onRefreshPlaylists={handleRefreshAll}
+        onOpenAdmin={() => {
+          setIsPlaylistModalOpen(false);
+          setIsAdminModalOpen(true);
+        }}
       />
 
       <EpgModal
@@ -276,6 +366,7 @@ export default function App() {
       <AdminModal
         isOpen={isAdminModalOpen}
         onClose={() => setIsAdminModalOpen(false)}
+        onRefreshAll={handleRefreshAll}
       />
 
       <ExternalPlayerModal

@@ -39,12 +39,11 @@ https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
 https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8
 `;
 
-  const playlists = await dbService.getAllPlaylists();
+  const wasSeeded = await dbService.getSetting('demo_seeded_v2');
   const plId = 'pl-default-demo';
-  const existingDefault = playlists.find(p => p.id === plId);
 
-  // If empty or default demo playlist has old URLs, refresh it
-  if (playlists.length === 0 || existingDefault) {
+  // Seed sample playlist on initial startup only
+  if (!wasSeeded) {
     const channels = parseM3U(demoM3U, plId);
     await dbService.savePlaylist({
       id: plId,
@@ -53,10 +52,11 @@ https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4
       channelCount: channels.length,
       isActive: true,
       lastUpdated: new Date().toISOString(),
-      createdAt: existingDefault ? existingDefault.createdAt : new Date().toISOString()
+      createdAt: new Date().toISOString()
     });
     await dbService.deleteChannelsByPlaylist(plId);
     await dbService.insertChannelsBatch(channels);
+    await dbService.setSetting('demo_seeded_v2', 'true');
     logger.info(`Initialized sample playlist with ${channels.length} verified live streams.`);
   }
 

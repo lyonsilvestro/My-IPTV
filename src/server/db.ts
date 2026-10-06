@@ -533,5 +533,138 @@ export const dbService = {
       playlistCount: plRows[0]?.cnt || 0,
       channelCount: chRows[0]?.cnt || 0
     };
+  },
+
+  async exportBackupData(): Promise<any> {
+    const db = await getDb();
+    const playlists = await this.getAllPlaylists();
+    const channels = stmtToObjects<any>(db, 'SELECT * FROM channels');
+    const settings = stmtToObjects<any>(db, 'SELECT * FROM settings');
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      stats: {
+        playlistCount: playlists.length,
+        channelCount: channels.length
+      },
+      playlists,
+      channels,
+      settings
+    };
+  },
+
+  async restoreBackupData(backupData: any): Promise<{ playlistsRestored: number; channelsRestored: number }> {
+    if (!backupData || !Array.isArray(backupData.playlists) || !Array.isArray(backupData.channels)) {
+      throw new Error('Dữ liệu sao lưu không đúng định dạng. Phải bao gồm mảng playlists và channels.');
+    }
+
+    const db = await getDb();
+    db.run('BEGIN TRANSACTION;');
+    try {
+      db.run('DELETE FROM channels;');
+      db.run('DELETE FROM playlists;');
+
+      for (const pl of backupData.playlists) {
+        db.run(
+          `INSERT INTO playlists (id, name, url, type, channelCount, isActive, lastUpdated, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+          [
+            pl.id,
+            pl.name,
+            pl.url || null,
+            pl.type || 'upload',
+            pl.channelCount || 0,
+            pl.isActive ? 1 : 0,
+            pl.lastUpdated || new Date().toISOString(),
+            pl.createdAt || new Date().toISOString()
+          ]
+        );
+      }
+
+      const stmtCh = db.prepare(`
+        INSERT INTO channels (id, playlistId, name, logo, groupTitle, url, tvgId, tvgName, orderIndex)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+      `);
+
+      for (const ch of backupData.channels) {
+        stmtCh.run([
+          ch.id,
+          ch.playlistId,
+          ch.name,
+          ch.logo || null,
+          ch.groupTitle || null,
+          ch.url,
+          ch.tvgId || null,
+          ch.tvgName || null,
+          ch.orderIndex || 0
+        ]);
+      }
+      stmtCh.free();
+
+      if (Array.isArray(backupData.settings)) {
+        for (const s of backupData.settings) {
+          db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?);', [s.key, s.value]);
+        }
+      }
+
+      db.run('COMMIT;');
+      saveToDisk();
+      return {
+        playlistsRestored: backupData.playlists.length,
+        channelsRestored: backupData.channels.length
+      };
+    } catch (err) {
+      db.run('ROLLBACK;');
+      throw err;
+    }
+  },
+
+  async getRawDbBuffer(): Promise<Buffer | null> {
+    const db = await getDb();
+    const data = db.export();
+    return Buffer.from(data);
+  },
+
+  async restoreRawDbBuffer(buffer: Buffer): Promise<{ playlistsRestored: number; channelsRestored: number }> {
+    const SQL = await initSqlJs();
+    const newDb = new SQL.Database(buffer);
+
+    // Verify basic tables exist
+    const testStmt = newDb.prepare("SELECT COUNT(*) as cnt FROM sqlite_master WHERE type='table' AND name IN ('playlists', 'channels')");
+    testStmt.step();
+    const row = testStmt.getAsObject() as { cnt: number };
+    testStmt.free();
+
+    if (!row || row.cnt < 2) {
+      throw new Error('File cơ sở dữ liệu SQLite không hợp lệ hoặc thiếu bảng playlists / channels.');
+    }
+
+    dbInstance = newDb;
+    saveToDisk();
+
+    const stats = await this.getStats();
+    return {
+      playlistsRestored: stats.playlistCount,
+      channelsRestored: stats.channelCount
+    };
+  },
+
+  getDbFileInfo(): { sizeBytes: number; lastModified: string | null } {
+    try {
+      if (fs.existsSync(config.dbPath)) {
+        const stats = fs.statSync(config.dbPath);
+        return {
+          sizeBytes: stats.size,
+          lastModified: stats.mtime.toISOString()
+        };
+      }
+    } catch (e) {
+      // ignore
+    }
+    return {
+      sizeBytes: 0,
+      lastModified: null
+    };
   }
 };

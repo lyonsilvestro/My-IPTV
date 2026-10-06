@@ -73,6 +73,8 @@ export interface ServerMetrics {
   activeTranscodeSessions: number;
   totalPlaylists: number;
   totalChannels: number;
+  dbFileSizeKb?: number;
+  dbLastModified?: string | null;
   ffmpegAvailable: boolean;
 }
 
