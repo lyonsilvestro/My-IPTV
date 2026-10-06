@@ -2,7 +2,7 @@ services:
   - type: web
     name: iptv-web-app
     runtime: docker
-    plan: starter
+    plan: free
     region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
@@ -18,14 +18,10 @@ services:
       - key: SESSION_SECRET
         generateValue: true
       - key: MAX_TRANSCODE_SESSIONS
-        value: "5"
+        value: "3"
       - key: PLAYLIST_REFRESH_INTERVAL
         value: "21600"
       - key: ALLOW_LAN_ACCESS
         value: "false"
       - key: DATABASE_PATH
         value: /app/data/iptv.db
-    disk:
-      name: iptv-data
-      mountPath: /app/data
-      sizeGB: 1
