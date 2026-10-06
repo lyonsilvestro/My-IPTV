@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy dependency definitions
-COPY package*.json ./
+COPY package*.json .npmrc* ./
 
-# Install all dependencies
-RUN npm install
+# Install all dependencies with legacy peer deps protection
+RUN npm install --legacy-peer-deps
 
 # Copy application source code
 COPY . .
