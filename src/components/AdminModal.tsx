@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { ServerMetrics, TranscodeSessionInfo, LogEntry } from '../types/iptv.ts';
 import { apiUrl } from '../lib/api.ts';
+import { setAdminSession, isAdminLoggedIn, getAuthHeaders, clearAdminSession } from '../lib/auth.ts';
 
 interface AdminModalProps {
   isOpen: boolean;
@@ -31,6 +32,15 @@ export const AdminModal: React.FC<AdminModalProps> = ({ isOpen, onClose }) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [logFilter, setLogFilter] = useState<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Check existing session on open
+  useEffect(() => {
+    if (isOpen) {
+      if (isAdminLoggedIn()) {
+        setIsAuthenticated(true);
+      }
+    }
+  }, [isOpen]);
 
   // Poll metrics when open and authenticated
   useEffect(() => {
@@ -73,6 +83,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({ isOpen, onClose }) => {
       if (!resp.ok) {
         throw new Error(data.error || 'Sai thông tin đăng nhập');
       }
+      setAdminSession(data.token, data.username);
       setIsAuthenticated(true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

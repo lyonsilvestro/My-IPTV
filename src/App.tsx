@@ -12,6 +12,22 @@ import { ChannelWithEpg, Playlist } from './types/iptv.ts';
 import { apiUrl } from './lib/api.ts';
 import { Tv, Menu, X } from 'lucide-react';
 
+function getLocalFavoriteIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem('iptv_device_favorites');
+    if (raw) return new Set(JSON.parse(raw));
+  } catch {}
+  return new Set();
+}
+
+function saveLocalFavoriteIds(favSet: Set<string>) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('iptv_device_favorites', JSON.stringify(Array.from(favSet)));
+  } catch {}
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState<'live' | 'favorites' | 'history'>('live');
   const [selectedGroup, setSelectedGroup] = useState<string>('All');
@@ -51,13 +67,19 @@ export default function App() {
   const fetchChannels = useCallback(async () => {
     try {
       setIsLoadingChannels(true);
+      const localFavs = getLocalFavoriteIds();
+
       if (activeView === 'history') {
         const resp = await fetch(apiUrl('/api/history'));
         if (resp.ok) {
-          const data = await resp.json();
-          setChannels(data);
-          if (!activeChannel && data.length > 0) {
-            setActiveChannel(data[0]);
+          const data: ChannelWithEpg[] = await resp.json();
+          const enriched = data.map(ch => ({
+            ...ch,
+            isFavorite: localFavs.has(ch.id) || Boolean(ch.isFavorite)
+          }));
+          setChannels(enriched);
+          if (!activeChannel && enriched.length > 0) {
+            setActiveChannel(enriched[0]);
           }
         }
       } else {
@@ -68,17 +90,25 @@ export default function App() {
         if (searchQuery.trim()) {
           params.set('search', searchQuery.trim());
         }
-        if (activeView === 'favorites') {
-          params.set('favorites', 'true');
-        }
         params.set('limit', '500');
 
         const resp = await fetch(apiUrl(`/api/channels?${params.toString()}`));
         if (resp.ok) {
           const data = await resp.json();
-          setChannels(data.channels || []);
-          if (!activeChannel && data.channels && data.channels.length > 0) {
-            setActiveChannel(data.channels[0]);
+          let rawChannels: ChannelWithEpg[] = data.channels || [];
+          const enriched = rawChannels.map(ch => ({
+            ...ch,
+            isFavorite: localFavs.has(ch.id) || Boolean(ch.isFavorite)
+          }));
+
+          const filtered =
+            activeView === 'favorites'
+              ? enriched.filter(ch => ch.isFavorite)
+              : enriched;
+
+          setChannels(filtered);
+          if (!activeChannel && filtered.length > 0) {
+            setActiveChannel(filtered[0]);
           }
         }
       }
@@ -106,24 +136,39 @@ export default function App() {
 
   const handleToggleFavorite = async (channelId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    try {
-      const resp = await fetch(apiUrl(`/api/channels/${channelId}/favorite`), { method: 'POST' });
-      if (resp.ok) {
-        const { isFavorite } = await resp.json();
-        setChannels(prev =>
-          prev.map(ch => (ch.id === channelId ? { ...ch, isFavorite } : ch))
-        );
-        if (activeChannel?.id === channelId) {
-          setActiveChannel(prev => (prev ? { ...prev, isFavorite } : null));
-        }
-      }
-    } catch (err) {
-      console.error('Failed to toggle favorite:', err);
+    const localFavs = getLocalFavoriteIds();
+    const nextIsFav = !localFavs.has(channelId);
+
+    if (nextIsFav) {
+      localFavs.add(channelId);
+    } else {
+      localFavs.delete(channelId);
     }
+    saveLocalFavoriteIds(localFavs);
+
+    // Update state immediately for zero-lag feedback
+    setChannels(prev => {
+      const updated = prev.map(ch =>
+        ch.id === channelId ? { ...ch, isFavorite: nextIsFav } : ch
+      );
+      if (activeView === 'favorites') {
+        return updated.filter(ch => ch.isFavorite);
+      }
+      return updated;
+    });
+
+    if (activeChannel?.id === channelId) {
+      setActiveChannel(prev => (prev ? { ...prev, isFavorite: nextIsFav } : null));
+    }
+
+    // Also sync to server in background
+    try {
+      fetch(apiUrl(`/api/channels/${channelId}/favorite`), { method: 'POST' }).catch(() => {});
+    } catch {}
   };
 
   const totalChannelsCount = groups.reduce((acc, curr) => acc + curr.count, 0);
-  const favoritesCount = channels.filter(c => c.isFavorite).length;
+  const favoritesCount = getLocalFavoriteIds().size;
 
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">

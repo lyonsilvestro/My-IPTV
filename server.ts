@@ -60,6 +60,32 @@ https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4
     logger.info(`Initialized sample playlist with ${channels.length} verified live streams.`);
   }
 
+  // Auto-detect Nokia E72 / Symbian / Opera Mini / WAP browsers and redirect root path to /legacy
+  app.use((req, res, next) => {
+    if (req.path === '/' || req.path === '/index.html') {
+      const ua = (req.headers['user-agent'] || '').toLowerCase();
+      const isOperaMini = Boolean(req.headers['x-operamini-features'] || req.headers['x-operamini-phone']);
+      const isLegacy =
+        isOperaMini ||
+        ua.includes('opera mini') ||
+        ua.includes('symbian') ||
+        ua.includes('series60') ||
+        ua.includes('s60') ||
+        ua.includes('nokia') ||
+        ua.includes('midp') ||
+        ua.includes('j2me') ||
+        ua.includes('ucbrowser') ||
+        ua.includes('ucweb') ||
+        ua.includes('netfront');
+
+      if (isLegacy) {
+        logger.info(`Detected legacy device [${req.headers['user-agent']}], auto-redirecting to /legacy`);
+        return res.redirect('/legacy');
+      }
+    }
+    next();
+  });
+
   // Mount backend API and Legacy Router
   app.use('/api', apiRouter);
   app.use('/legacy', legacyRouter);

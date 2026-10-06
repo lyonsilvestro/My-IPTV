@@ -19,6 +19,25 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB max playlist
 });
 
+// Admin authentication state
+const validAdminTokens = new Set<string>();
+
+export function requireAdminAuth(req: Request, res: Response, next: () => void) {
+  const authHeader = req.headers['authorization'] || req.headers['x-admin-token'];
+  let token = '';
+  if (typeof authHeader === 'string') {
+    token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  }
+
+  if (!token || !validAdminTokens.has(token)) {
+    res.status(403).json({
+      error: 'Quyền bị từ chối: Chỉ Quản trị viên (Admin) mới có quyền thêm, xóa hoặc cập nhật danh sách kênh hệ thống.'
+    });
+    return;
+  }
+  next();
+}
+
 // Health check endpoint
 router.get('/health', async (req: Request, res: Response) => {
   let dbOk = false;
@@ -133,7 +152,7 @@ router.get('/playlists', async (req: Request, res: Response) => {
 });
 
 // Add playlist via URL or JSON body
-router.post('/playlists', async (req: Request, res: Response) => {
+router.post('/playlists', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { name, url, content } = req.body;
     if (!name || (!url && !content)) {
@@ -194,7 +213,7 @@ router.post('/playlists', async (req: Request, res: Response) => {
 });
 
 // Upload M3U file
-router.post('/playlists/upload', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/playlists/upload', requireAdminAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     const name = req.body.name || file?.originalname || 'Uploaded Playlist';
@@ -236,7 +255,7 @@ router.post('/playlists/upload', upload.single('file'), async (req: Request, res
 });
 
 // Refresh playlist from URL
-router.post('/playlists/:id/refresh', async (req: Request, res: Response) => {
+router.post('/playlists/:id/refresh', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const playlist = await dbService.getPlaylist(req.params.id);
     if (!playlist) {
@@ -284,7 +303,7 @@ router.post('/playlists/:id/refresh', async (req: Request, res: Response) => {
 });
 
 // Toggle playlist active state
-router.post('/playlists/:id/toggle', async (req: Request, res: Response) => {
+router.post('/playlists/:id/toggle', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const playlist = await dbService.getPlaylist(req.params.id);
     if (!playlist) {
@@ -302,7 +321,7 @@ router.post('/playlists/:id/toggle', async (req: Request, res: Response) => {
 });
 
 // Delete playlist
-router.delete('/playlists/:id', async (req: Request, res: Response) => {
+router.delete('/playlists/:id', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     await dbService.deletePlaylist(req.params.id);
     logger.info(`Deleted playlist: ${req.params.id}`);
@@ -314,7 +333,7 @@ router.delete('/playlists/:id', async (req: Request, res: Response) => {
 });
 
 // EPG API
-router.post('/epg/fetch', async (req: Request, res: Response) => {
+router.post('/epg/fetch', requireAdminAuth, async (req: Request, res: Response) => {
   try {
     const { url } = req.body;
     if (!url) {
@@ -332,7 +351,7 @@ router.post('/epg/fetch', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/epg/upload', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/epg/upload', requireAdminAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const file = req.file;
     if (!file) {
@@ -540,13 +559,40 @@ router.get('/transcode/live/:channelId/:profile.ts', async (req: Request, res: R
 router.post('/admin/login', (req: Request, res: Response) => {
   const { username, password } = req.body;
   if (username === config.adminUsername && password === config.adminPassword) {
-    // Generate simple session token
+    // Generate secure session token and register
     const token = `adm_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    validAdminTokens.add(token);
+    logger.info(`Admin logged in successfully: ${username}`);
     res.json({ success: true, token, username });
   } else {
     logger.warn(`Failed admin login attempt for user: ${username}`);
     res.status(401).json({ error: 'Sai tên đăng nhập hoặc mật khẩu.' });
   }
+});
+
+router.get('/admin/verify', (req: Request, res: Response) => {
+  const authHeader = req.headers['authorization'] || req.headers['x-admin-token'];
+  let token = '';
+  if (typeof authHeader === 'string') {
+    token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  }
+  if (token && validAdminTokens.has(token)) {
+    res.json({ authenticated: true, username: config.adminUsername });
+  } else {
+    res.json({ authenticated: false });
+  }
+});
+
+router.post('/admin/logout', (req: Request, res: Response) => {
+  const authHeader = req.headers['authorization'] || req.headers['x-admin-token'];
+  let token = '';
+  if (typeof authHeader === 'string') {
+    token = authHeader.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+  }
+  if (token) {
+    validAdminTokens.delete(token);
+  }
+  res.json({ success: true });
 });
 
 router.get('/admin/metrics', async (req: Request, res: Response) => {
