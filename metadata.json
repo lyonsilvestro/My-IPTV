@@ -1,0 +1,6 @@
+{
+  "name": "IPTV Web Stream & Transcoder",
+  "description": "Ứng dụng Web IPTV hiện đại, hỗ trợ M3U playlist, EPG, chuyển mã FFmpeg theo thời gian thực và chế độ tương thích Legacy/Nokia E72.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

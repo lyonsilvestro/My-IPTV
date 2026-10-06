@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/* Custom dark scrollbar for sleek IPTV UI */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #121214;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* Ensure video element fits neatly */
+video {
+  outline: none;
+}

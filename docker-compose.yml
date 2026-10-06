@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  iptv-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iptv-web-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/iptv.db
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SESSION_SECRET=${SESSION_SECRET:-change-this-secret-in-production}
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      - MAX_TRANSCODE_SESSIONS=${MAX_TRANSCODE_SESSIONS:-5}
+      - PLAYLIST_REFRESH_INTERVAL=${PLAYLIST_REFRESH_INTERVAL:-21600}
+      - ALLOW_LAN_ACCESS=${ALLOW_LAN_ACCESS:-false}
+      - LEGACY_BASE_URL=${LEGACY_BASE_URL:-}
+    volumes:
+      - ./data:/app/data
+      - ./transcode_cache:/app/transcode_cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
