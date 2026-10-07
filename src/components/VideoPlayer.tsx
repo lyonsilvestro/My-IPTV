@@ -263,42 +263,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? apiUrl(url)
       : resolvePlaybackUrl(url, mode, profile);
 
-    // 1. Native HLS support (Safari on macOS / iOS)
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = streamSource;
-      video
-        .play()
-        .then(() => {
-          setIsPlaying(true);
-          setIsLoadingStream(false);
-          setShowUnmuteNotice(false);
-        })
-        .catch(err => {
-          console.warn('Native playback unmuted blocked, falling back to muted:', err);
-          video.muted = true;
-          setIsMuted(true);
-          video
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              setIsLoadingStream(false);
-              setShowUnmuteNotice(true);
-            })
-            .catch(() => {
-              setIsLoadingStream(false);
-            });
-        });
-      return;
-    }
-
-    // 2. HLS.js for modern desktop browsers (Chrome, Edge, Firefox, Brave)
+    // 1. Prefer HLS.js for modern desktop and mobile browsers (Chrome, Edge, Firefox, Brave, Android)
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
         backBufferLength: 60,
-        manifestLoadingTimeOut: 12000,
-        levelLoadingTimeOut: 12000,
+        manifestLoadingTimeOut: 15000,
+        levelLoadingTimeOut: 15000,
         fragLoadingTimeOut: 15000,
         startLevel: -1
       });
@@ -342,6 +314,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
+              // Handle upstream 429 rate limit
+              if ((data.response as any)?.code === 429) {
+                setErrorMsg('Máy chủ luồng phát sóng đang giới hạn tần suất yêu cầu (429 Too Many Requests). Vui lòng đợi vài giây hoặc chọn "URL Nguồn trực tiếp".');
+                setIsLoadingStream(false);
+                break;
+              }
+
               // Seamless Auto-Fallback between Direct and Proxy!
               if (!autoFallbackAttemptedRef.current && channel && !isDirectLocalUrl) {
                 autoFallbackAttemptedRef.current = true;
@@ -399,16 +378,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }
         }
       });
-    } else {
-      // Direct video tag fallback
+      return;
+    }
+
+    // 2. Fall back to Native HLS ONLY for Safari iOS/macOS where Hls.js is NOT supported
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = streamSource;
       video
         .play()
         .then(() => {
           setIsPlaying(true);
           setIsLoadingStream(false);
+          setShowUnmuteNotice(false);
         })
-        .catch(() => {
+        .catch(err => {
+          console.warn('Native playback unmuted blocked, falling back to muted:', err);
           video.muted = true;
           setIsMuted(true);
           video
@@ -422,7 +406,31 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               setIsLoadingStream(false);
             });
         });
+      return;
     }
+
+    // 3. Direct HTML5 video fallback
+    video.src = streamSource;
+    video
+      .play()
+      .then(() => {
+        setIsPlaying(true);
+        setIsLoadingStream(false);
+      })
+      .catch(() => {
+        video.muted = true;
+        setIsMuted(true);
+        video
+          .play()
+          .then(() => {
+            setIsPlaying(true);
+            setIsLoadingStream(false);
+            setShowUnmuteNotice(true);
+          })
+          .catch(() => {
+            setIsLoadingStream(false);
+          });
+      });
   };
 
   // Public stream initializer for a channel
@@ -490,8 +498,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           setIsPlaying(true);
           setShowUnmuteNotice(true);
         } catch (err2) {
-          console.warn('Playback retry failed, re-initializing stream:', err2);
-          loadStream(channel, streamMode);
+          console.warn('Playback gesture required:', err2);
+          setIsPlaying(false);
         }
       }
     } else {

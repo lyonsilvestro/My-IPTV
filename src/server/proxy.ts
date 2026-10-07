@@ -47,6 +47,13 @@ export function rewriteM3u8Manifest(manifestText: string, baseUrl: string): stri
   return rewritten.join('\n');
 }
 
+// In-memory 3s manifest cache to protect upstream servers from 429 Too Many Requests
+interface ManifestCacheEntry {
+  body: string;
+  expiresAt: number;
+}
+const manifestCache = new Map<string, ManifestCacheEntry>();
+
 export async function handleStreamProxy(req: Request, res: Response): Promise<void> {
   const targetUrl = req.query.url as string;
   if (!targetUrl) {
@@ -60,10 +67,24 @@ export async function handleStreamProxy(req: Request, res: Response): Promise<vo
     return;
   }
 
+  const streamUrl = validation.parsedUrl.toString();
+
+  // Check fast manifest cache
+  const cached = manifestCache.get(streamUrl);
+  if (cached && cached.expiresAt > Date.now()) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.send(cached.body);
+    return;
+  }
+
   const customReferer = req.query.referer as string;
   const customUserAgent = (req.query.userAgent as string) || DEFAULT_USER_AGENT;
 
-  fetchAndProxy(validation.parsedUrl.toString(), req, res, customUserAgent, customReferer, 0);
+  fetchAndProxy(streamUrl, req, res, customUserAgent, customReferer, 0);
 }
 
 function fetchAndProxy(
@@ -103,10 +124,11 @@ function fetchAndProxy(
     headers['Range'] = req.headers.range;
   }
 
-  const options: http.RequestOptions = {
+  const options: https.RequestOptions = {
     method: 'GET',
     headers,
-    timeout: 15000
+    timeout: 15000,
+    rejectUnauthorized: false
   };
 
   const proxyReq = client.request(parsed, options, proxyRes => {
@@ -131,6 +153,7 @@ function fetchAndProxy(
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Expose-Headers', '*');
 
     // Forward status code
     res.status(proxyRes.statusCode || 200);
@@ -170,6 +193,7 @@ function fetchAndProxy(
       decodedStream.on('end', () => {
         if (bodyData.includes('#EXTM3U') || isM3u8ByExt) {
           const rewritten = rewriteM3u8Manifest(bodyData, streamUrl);
+          manifestCache.set(streamUrl, { body: rewritten, expiresAt: Date.now() + 3000 });
           res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
           res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
           res.send(rewritten);
