@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import http from 'http';
 import https from 'https';
+import zlib from 'zlib';
 import { URL } from 'url';
 import { validateStreamUrl } from './security.ts';
 import { logger } from './logger.ts';
@@ -90,7 +91,8 @@ function fetchAndProxy(
 
   const headers: Record<string, string> = {
     'User-Agent': userAgent,
-    'Accept': '*/*'
+    'Accept': '*/*',
+    'Accept-Encoding': 'gzip, deflate, br'
   };
 
   if (referer) {
@@ -134,6 +136,7 @@ function fetchAndProxy(
     res.status(proxyRes.statusCode || 200);
 
     const rawContentType = (proxyRes.headers['content-type'] || '').toLowerCase();
+    const contentEncoding = (proxyRes.headers['content-encoding'] || '').toLowerCase();
     const cleanPath = parsed.pathname.toLowerCase();
     const isM3u8ByExt = cleanPath.endsWith('.m3u8') || parsed.search.toLowerCase().includes('.m3u8');
     const isM3u8ByType =
@@ -141,14 +144,55 @@ function fetchAndProxy(
       rawContentType.includes('application/x-mpegurl') ||
       rawContentType.includes('vnd.apple.mpegurl');
 
-    // Forward selected headers for media chunks or general responses
-    const forwardHeaders = [
-      'content-length',
-      'accept-ranges',
-      'content-range',
-      'cache-control'
-    ];
+    // Decompress stream if upstream used gzip / deflate / br
+    let decodedStream: NodeJS.ReadableStream = proxyRes;
+    if (contentEncoding === 'gzip') {
+      const gunzip = zlib.createGunzip();
+      proxyRes.pipe(gunzip);
+      decodedStream = gunzip;
+    } else if (contentEncoding === 'deflate') {
+      const inflate = zlib.createInflate();
+      proxyRes.pipe(inflate);
+      decodedStream = inflate;
+    } else if (contentEncoding === 'br') {
+      const brotli = zlib.createBrotliDecompress();
+      proxyRes.pipe(brotli);
+      decodedStream = brotli;
+    }
 
+    // Check if this response is an M3U8 playlist
+    if (isM3u8ByExt || isM3u8ByType) {
+      let bodyData = '';
+      decodedStream.setEncoding('utf8');
+      decodedStream.on('data', chunk => {
+        bodyData += chunk;
+      });
+      decodedStream.on('end', () => {
+        if (bodyData.includes('#EXTM3U') || isM3u8ByExt) {
+          const rewritten = rewriteM3u8Manifest(bodyData, streamUrl);
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.send(rewritten);
+        } else {
+          if (rawContentType) {
+            res.setHeader('Content-Type', rawContentType);
+          }
+          res.send(bodyData);
+        }
+      });
+
+      decodedStream.on('error', err => {
+        logger.warn(`Decompression error on M3U8: ${err.message}`);
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Failed to decompress upstream stream' });
+        }
+      });
+      return;
+    }
+
+    // For non-M3U8 responses (e.g. .ts video chunks, binary streams)
+    // Forward general media headers
+    const forwardHeaders = ['accept-ranges', 'content-range', 'cache-control'];
     forwardHeaders.forEach(h => {
       const val = proxyRes.headers[h];
       if (val) {
@@ -156,73 +200,21 @@ function fetchAndProxy(
       }
     });
 
-    // Check if this response is an M3U8 playlist
-    if (isM3u8ByExt || isM3u8ByType) {
-      let bodyData = '';
-      proxyRes.setEncoding('utf8');
-      proxyRes.on('data', chunk => {
-        bodyData += chunk;
-      });
-      proxyRes.on('end', () => {
-        if (bodyData.includes('#EXTM3U') || isM3u8ByExt) {
-          const rewritten = rewriteM3u8Manifest(bodyData, streamUrl);
-          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.send(rewritten);
-        } else {
-          // If not starting with #EXTM3U, send as is
-          if (rawContentType) {
-            res.setHeader('Content-Type', rawContentType);
-          }
-          res.send(bodyData);
-        }
-      });
-      return;
+    if (cleanPath.endsWith('.ts') || rawContentType.includes('mp2t')) {
+      res.setHeader('Content-Type', 'video/mp2t');
+    } else if (rawContentType) {
+      res.setHeader('Content-Type', rawContentType);
     }
 
-    // For non-M3U8 responses (e.g. .ts video chunks, binary streams)
-    // Inspect first chunk to see if it starts with #EXTM3U (some servers omit content-type and extension)
-    let isFirstChunk = true;
-    let isManifest = false;
-    let manifestBuffer = '';
+    // If media was not compressed, forward content-length
+    if (!contentEncoding && proxyRes.headers['content-length']) {
+      res.setHeader('Content-Length', proxyRes.headers['content-length']);
+    }
 
-    proxyRes.on('data', chunk => {
-      if (isFirstChunk) {
-        isFirstChunk = false;
-        const chunkStr = chunk.slice(0, 10).toString('utf8');
-        if (chunkStr.startsWith('#EXTM3U')) {
-          isManifest = true;
-          manifestBuffer += chunk.toString('utf8');
-          return;
-        }
+    // Stream binary video chunks
+    decodedStream.pipe(res);
 
-        // Set proper content type for TS segments if missing
-        if (cleanPath.endsWith('.ts') && !rawContentType) {
-          res.setHeader('Content-Type', 'video/mp2t');
-        } else if (rawContentType) {
-          res.setHeader('Content-Type', rawContentType);
-        }
-      }
-
-      if (isManifest) {
-        manifestBuffer += chunk.toString('utf8');
-      } else {
-        res.write(chunk);
-      }
-    });
-
-    proxyRes.on('end', () => {
-      if (isManifest) {
-        const rewritten = rewriteM3u8Manifest(manifestBuffer, streamUrl);
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.send(rewritten);
-      } else {
-        res.end();
-      }
-    });
-
-    proxyRes.on('error', err => {
+    decodedStream.on('error', err => {
       logger.warn(`Proxy stream error: ${err.message}`);
       if (!res.headersSent) {
         res.status(502).json({ error: 'Stream transfer failed' });

@@ -22,6 +22,24 @@ import {
 import { ChannelWithEpg, TranscodeProfile } from '../types/iptv.ts';
 import { apiUrl } from '../lib/api.ts';
 
+export type StreamMode = 'direct' | 'proxy';
+
+function getStoredStreamMode(): StreamMode {
+  if (typeof window === 'undefined') return 'direct';
+  try {
+    const saved = localStorage.getItem('iptv_preferred_stream_mode');
+    if (saved === 'direct' || saved === 'proxy') return saved;
+  } catch {}
+  return 'direct';
+}
+
+function saveStoredStreamMode(mode: StreamMode) {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem('iptv_preferred_stream_mode', mode);
+  } catch {}
+}
+
 interface VideoPlayerProps {
   channel: ChannelWithEpg | null;
   onToggleFavorite: (channelId: string) => void;
@@ -44,6 +62,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [aspectRatio, setAspectRatio] = useState<'16/9' | '4/3' | 'cover'>('16/9');
 
   const [selectedProfile, setSelectedProfile] = useState<TranscodeProfile>('original');
+  const [streamMode, setStreamMode] = useState<StreamMode>(getStoredStreamMode);
+  const [modeNotice, setModeNotice] = useState<string | null>(null);
   const [isTranscoding, setIsTranscoding] = useState<boolean>(false);
   const [transcodeHlsUrl, setTranscodeHlsUrl] = useState<string | null>(null);
 
@@ -144,10 +164,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return clean.endsWith('.ts') || clean.endsWith('.mpegts');
   };
 
-  // Helper to resolve stream playback URL based on profile
-  const resolvePlaybackUrl = (streamUrl: string, profile: TranscodeProfile): string => {
+  // Helper to resolve stream playback URL based on profile and streamMode
+  const resolvePlaybackUrl = (streamUrl: string, mode: StreamMode, profile: TranscodeProfile): string => {
     if (profile !== 'original' && transcodeHlsUrl) {
       return apiUrl(transcodeHlsUrl);
+    }
+    if (mode === 'direct') {
+      return streamUrl;
     }
     // Route through /api/proxy to rewrite M3U8 manifests and bypass CORS / Mixed Content
     return apiUrl(`/api/proxy?url=${encodeURIComponent(streamUrl)}`);
@@ -178,7 +201,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setSelectedProfile(profileToUse);
       setTranscodeHlsUrl(data.hlsUrl);
       setErrorMsg(null);
-      loadStreamInternal(data.hlsUrl, profileToUse, true);
+      loadStreamInternal(data.hlsUrl, 'direct', profileToUse, true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(`Lỗi chuyển mã: ${msg}`);
@@ -196,7 +219,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setSelectedProfile('original');
       setIsTranscoding(false);
       setTranscodeHlsUrl(null);
-      loadStreamInternal(channel.url, 'original', false);
+      loadStreamInternal(channel.url, streamMode, 'original', false);
       return;
     }
 
@@ -204,10 +227,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     startTranscodeSession(newProfile, false);
   };
 
+  // Switch playback mode explicitly (direct vs proxy) and remember preference
+  const handleSwitchMode = (newMode: StreamMode) => {
+    if (!channel) return;
+    saveStoredStreamMode(newMode);
+    setStreamMode(newMode);
+    setSelectedProfile('original');
+    setIsTranscoding(false);
+    setTranscodeHlsUrl(null);
+    autoFallbackAttemptedRef.current = false;
+    setModeNotice(
+      newMode === 'direct'
+        ? 'Đã chuyển sang: URL Nguồn trực tiếp (Đã lưu mặc định)'
+        : 'Đã chuyển sang: Proxy máy chủ (Đã lưu mặc định)'
+    );
+    setTimeout(() => setModeNotice(null), 3500);
+    loadStreamInternal(channel.url, newMode, 'original', false);
+  };
+
   // Main Stream Loader
   const loadStreamInternal = (
     url: string,
-    profile: TranscodeProfile,
+    mode: StreamMode,
+    profile: TranscodeProfile = 'original',
     isDirectLocalUrl = false
   ) => {
     const video = videoRef.current;
@@ -217,7 +259,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setErrorMsg(null);
     setIsLoadingStream(true);
 
-    const streamSource = isDirectLocalUrl ? apiUrl(url) : resolvePlaybackUrl(url, profile);
+    const streamSource = isDirectLocalUrl
+      ? apiUrl(url)
+      : resolvePlaybackUrl(url, mode, profile);
 
     // 1. Native HLS support (Safari on macOS / iOS)
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
@@ -227,10 +271,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         .then(() => {
           setIsPlaying(true);
           setIsLoadingStream(false);
+          setShowUnmuteNotice(false);
         })
         .catch(err => {
-          console.warn('Native playback requires user gesture or mute:', err);
-          setIsLoadingStream(false);
+          console.warn('Native playback unmuted blocked, falling back to muted:', err);
+          video.muted = true;
+          setIsMuted(true);
+          video
+            .play()
+            .then(() => {
+              setIsPlaying(true);
+              setIsLoadingStream(false);
+              setShowUnmuteNotice(true);
+            })
+            .catch(() => {
+              setIsLoadingStream(false);
+            });
         });
       return;
     }
@@ -256,7 +312,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         retryCountRef.current = 0;
         setErrorMsg(null);
 
-        // Attempt playback
+        // Attempt playback immediately
         video
           .play()
           .then(() => {
@@ -264,7 +320,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             setShowUnmuteNotice(false);
           })
           .catch(err => {
-            console.warn('Autoplay blocked by browser policy. Falling back to muted play:', err);
+            console.warn('Autoplay unmuted blocked by browser policy. Falling back to muted play:', err);
             // Autoplay policy fallback: mute audio to allow instant live video playback on PC
             video.muted = true;
             setIsMuted(true);
@@ -286,6 +342,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
+              // Seamless Auto-Fallback between Direct and Proxy!
+              if (!autoFallbackAttemptedRef.current && channel && !isDirectLocalUrl) {
+                autoFallbackAttemptedRef.current = true;
+                if (mode === 'direct') {
+                  setModeNotice('Luồng trực tiếp cần vượt kiểm tra mạng (CORS). Đang tự động thử qua Proxy máy chủ...');
+                  setTimeout(() => setModeNotice(null), 4000);
+                  setStreamMode('proxy');
+                  loadStreamInternal(channel.url, 'proxy', 'original', false);
+                  return;
+                } else if (mode === 'proxy') {
+                  setModeNotice('Proxy máy chủ gặp sự cố mạng. Đang tự động thử bằng URL Nguồn trực tiếp...');
+                  setTimeout(() => setModeNotice(null), 4000);
+                  setStreamMode('direct');
+                  loadStreamInternal(channel.url, 'direct', 'original', false);
+                  return;
+                }
+              }
+
               if (retryCountRef.current < maxRetries) {
                 retryCountRef.current += 1;
                 const delay = retryCountRef.current * 1500;
@@ -297,11 +371,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   }
                 }, delay);
               } else if (!autoFallbackAttemptedRef.current && channel) {
-                // Auto-fallback to FFmpeg remux if direct network failed
                 autoFallbackAttemptedRef.current = true;
                 startTranscodeSession('original', true);
               } else {
-                setErrorMsg('Không thể tải luồng phát sóng từ máy chủ gốc. Bạn có thể thử chuyển mã FFmpeg hoặc mở bằng VLC.');
+                setErrorMsg('Không thể tải luồng phát sóng từ máy chủ gốc. Hãy thử bấm "URL Nguồn trực tiếp" hoặc "Proxy máy chủ" bên dưới.');
                 setIsLoadingStream(false);
               }
               break;
@@ -312,13 +385,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               break;
 
             default:
-              // Manifest parse error: stream is likely raw MPEG-TS or needs FFmpeg packaging
-              if (!autoFallbackAttemptedRef.current && channel) {
+              if (!autoFallbackAttemptedRef.current && channel && !isDirectLocalUrl) {
                 autoFallbackAttemptedRef.current = true;
-                setErrorMsg('Đang tự động chuyển sang chế độ tương thích trình duyệt (FFmpeg)...');
-                startTranscodeSession('original', true);
+                const alternateMode = mode === 'direct' ? 'proxy' : 'direct';
+                setStreamMode(alternateMode);
+                loadStreamInternal(channel.url, alternateMode, 'original', false);
               } else {
-                setErrorMsg('Luồng stream cần chuyển mã để phát trên trình duyệt này. Nhấn nút "Thử chuyển mã FFmpeg" bên dưới.');
+                setErrorMsg('Luồng stream cần chuyển mã để phát trên trình duyệt này. Nhấn nút "Chuyển mã FFmpeg" bên dưới.');
                 destroyHls();
                 setIsLoadingStream(false);
               }
@@ -336,16 +409,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           setIsLoadingStream(false);
         })
         .catch(() => {
-          setIsLoadingStream(false);
+          video.muted = true;
+          setIsMuted(true);
+          video
+            .play()
+            .then(() => {
+              setIsPlaying(true);
+              setIsLoadingStream(false);
+              setShowUnmuteNotice(true);
+            })
+            .catch(() => {
+              setIsLoadingStream(false);
+            });
         });
     }
   };
 
   // Public stream initializer for a channel
-  const loadStream = (targetChannel: ChannelWithEpg) => {
+  const loadStream = (targetChannel: ChannelWithEpg, preferredMode?: StreamMode) => {
     autoFallbackAttemptedRef.current = false;
     retryCountRef.current = 0;
     setErrorMsg(null);
+
+    const mode = preferredMode || streamMode;
 
     // If stream URL is raw MPEG-TS (.ts), modern browsers need HLS packaging
     if (isRawTsStream(targetChannel.url)) {
@@ -353,11 +439,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       return;
     }
 
-    // Standard HLS (.m3u8) or generic stream: try direct reverse-proxied play first
     setSelectedProfile('original');
     setIsTranscoding(false);
     setTranscodeHlsUrl(null);
-    loadStreamInternal(targetChannel.url, 'original', false);
+    loadStreamInternal(targetChannel.url, mode, 'original', false);
   };
 
   // Re-load stream whenever active channel changes
@@ -371,7 +456,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     // Record watch history
     fetch(apiUrl(`/api/channels/${channel.id}/history`), { method: 'POST' }).catch(() => {});
 
-    loadStream(channel);
+    loadStream(channel, streamMode);
 
     return () => {
       destroyHls();
@@ -388,7 +473,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
       // If video has no active stream or is errored out, reload the stream
       if (!hlsRef.current && !video.src) {
-        loadStream(channel);
+        loadStream(channel, streamMode);
         return;
       }
 
@@ -406,7 +491,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           setShowUnmuteNotice(true);
         } catch (err2) {
           console.warn('Playback retry failed, re-initializing stream:', err2);
-          loadStream(channel);
+          loadStream(channel, streamMode);
         }
       }
     } else {
@@ -533,6 +618,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </button>
         )}
 
+        {/* Mode Switch Notice Pill (Top-center) */}
+        {modeNotice && (
+          <div className="absolute top-3 inset-x-0 mx-auto max-w-fit flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900/95 border border-zinc-700 text-zinc-200 text-xs font-medium z-25 shadow-xl transition-all animate-in fade-in pointer-events-none">
+            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            <span>{modeNotice}</span>
+          </div>
+        )}
+
         {/* Prominent Center Play Button when paused/idle */}
         {!isPlaying && !isLoadingStream && !errorMsg && (
           <div
@@ -572,6 +665,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{errorMsg}</p>
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
+              {streamMode !== 'direct' && (
+                <button
+                  onClick={() => handleSwitchMode('direct')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shadow-lg shadow-emerald-950 cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5 fill-white" /> Thử URL Nguồn trực tiếp
+                </button>
+              )}
+              {streamMode !== 'proxy' && (
+                <button
+                  onClick={() => handleSwitchMode('proxy')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-semibold text-white shadow-lg shadow-blue-950 cursor-pointer"
+                >
+                  <Radio className="w-3.5 h-3.5" /> Thử Proxy máy chủ
+                </button>
+              )}
               <button
                 onClick={handleRetryStream}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 cursor-pointer"
@@ -580,15 +689,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
               <button
                 onClick={() => startTranscodeSession('original', false)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shadow-lg shadow-emerald-950 cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-semibold text-white shadow-lg shadow-purple-950 cursor-pointer"
               >
-                <Sparkles className="w-3.5 h-3.5" /> Phát qua FFmpeg (Remux HLS)
-              </button>
-              <button
-                onClick={() => handleProfileChange('mobile')}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 cursor-pointer"
-              >
-                <Sliders className="w-3.5 h-3.5" /> Mobile 360p
+                <Sparkles className="w-3.5 h-3.5" /> Phát qua FFmpeg (Remux)
               </button>
               <button
                 onClick={() => onOpenExternalModal(channel)}
@@ -709,9 +812,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <span className="text-xs px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-300 border border-zinc-700">
                   {channel.group || 'Chung'}
                 </span>
-                {isTranscoding && (
+                {streamMode === 'direct' ? (
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-emerald-950 text-emerald-300 border border-emerald-800 font-semibold">
+                    URL Nguồn trực tiếp (Direct)
+                  </span>
+                ) : isTranscoding ? (
                   <span className="text-xs px-2 py-0.5 rounded-md bg-purple-950 text-purple-300 border border-purple-800 font-semibold animate-pulse">
                     FFmpeg: {selectedProfile.toUpperCase()}
+                  </span>
+                ) : (
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-blue-950 text-blue-300 border border-blue-800 font-semibold">
+                    Proxy HLS (Gzip Decoded)
                   </span>
                 )}
               </div>
@@ -761,20 +872,43 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </span>
 
           <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={() => handleSwitchMode('proxy')}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                streamMode === 'proxy' && selectedProfile === 'original' && !isTranscoding
+                  ? 'bg-blue-600 text-white border-blue-500 shadow-sm font-semibold'
+                  : 'bg-zinc-800/80 text-zinc-300 border-zinc-700/80 hover:bg-zinc-700 hover:text-white'
+              }`}
+              title="Phát qua Proxy máy chủ (Tự động giải nén Gzip, vượt lỗi CORS & Mixed Content)"
+            >
+              Gốc (Proxy HLS)
+            </button>
+
+            <button
+              onClick={() => handleSwitchMode('direct')}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                streamMode === 'direct' && !isTranscoding
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm font-semibold'
+                  : 'bg-zinc-800/80 text-zinc-300 border-zinc-700/80 hover:bg-zinc-700 hover:text-white'
+              }`}
+              title="Phát thẳng bằng URL nguồn trực tiếp của nhà đài (Không qua máy chủ)"
+            >
+              URL Nguồn trực tiếp (Raw Direct)
+            </button>
+
             {[
-              { id: 'original' as TranscodeProfile, label: 'Gốc (Direct / Original)', desc: 'Không chuyển mã (Copy)' },
               { id: 'mobile' as TranscodeProfile, label: 'Mobile 360p', desc: 'H.264/AAC 700k' },
               { id: 'low' as TranscodeProfile, label: 'Low 240p', desc: 'H.264 400k - Mạng yếu' },
               { id: 'nokia_e72' as TranscodeProfile, label: 'Nokia E72 (240p 15fps)', desc: 'Symbian S60 Baseline' }
             ].map(prof => {
-              const isCurrent = selectedProfile === prof.id;
+              const isCurrent = streamMode !== 'direct' && selectedProfile === prof.id && isTranscoding;
               return (
                 <button
                   key={prof.id}
                   onClick={() => handleProfileChange(prof.id)}
                   className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                     isCurrent
-                      ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                      ? 'bg-purple-600 text-white border-purple-500 shadow-sm font-semibold'
                       : 'bg-zinc-800/80 text-zinc-300 border-zinc-700/80 hover:bg-zinc-700 hover:text-white'
                   }`}
                   title={prof.desc}
