@@ -5,7 +5,46 @@ import { URL } from 'url';
 import { validateStreamUrl } from './security.ts';
 import { logger } from './logger.ts';
 
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/**
+ * Rewrites relative and absolute URLs within an M3U8 manifest so all
+ * sub-playlists, media segments, and encryption keys are routed through /api/proxy.
+ * This completely avoids CORS and Mixed Content (HTTPS -> HTTP) blocking in browsers.
+ */
+export function rewriteM3u8Manifest(manifestText: string, baseUrl: string): string {
+  const lines = manifestText.split(/\r?\n/);
+  const rewritten = lines.map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+
+    // Handle M3U8 tags that contain URI attributes (e.g. #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA)
+    if (trimmed.startsWith('#')) {
+      if (trimmed.includes('URI=')) {
+        return trimmed.replace(/URI=["']?([^"',\s]+)["']?/g, (fullMatch, uri) => {
+          try {
+            const absoluteUri = new URL(uri, baseUrl).toString();
+            return `URI="/api/proxy?url=${encodeURIComponent(absoluteUri)}"`;
+          } catch {
+            return fullMatch;
+          }
+        });
+      }
+      return line;
+    }
+
+    // Line is a URI to a sub-playlist (.m3u8) or a media segment (.ts, .m4s, etc.)
+    try {
+      const absoluteUrl = new URL(trimmed, baseUrl).toString();
+      return `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+    } catch {
+      return line;
+    }
+  });
+
+  return rewritten.join('\n');
+}
 
 export async function handleStreamProxy(req: Request, res: Response): Promise<void> {
   const targetUrl = req.query.url as string;
@@ -94,9 +133,16 @@ function fetchAndProxy(
     // Forward status code
     res.status(proxyRes.statusCode || 200);
 
-    // Forward selected headers
+    const rawContentType = (proxyRes.headers['content-type'] || '').toLowerCase();
+    const cleanPath = parsed.pathname.toLowerCase();
+    const isM3u8ByExt = cleanPath.endsWith('.m3u8') || parsed.search.toLowerCase().includes('.m3u8');
+    const isM3u8ByType =
+      rawContentType.includes('mpegurl') ||
+      rawContentType.includes('application/x-mpegurl') ||
+      rawContentType.includes('vnd.apple.mpegurl');
+
+    // Forward selected headers for media chunks or general responses
     const forwardHeaders = [
-      'content-type',
       'content-length',
       'accept-ranges',
       'content-range',
@@ -110,8 +156,71 @@ function fetchAndProxy(
       }
     });
 
-    // Pipe response stream directly
-    proxyRes.pipe(res);
+    // Check if this response is an M3U8 playlist
+    if (isM3u8ByExt || isM3u8ByType) {
+      let bodyData = '';
+      proxyRes.setEncoding('utf8');
+      proxyRes.on('data', chunk => {
+        bodyData += chunk;
+      });
+      proxyRes.on('end', () => {
+        if (bodyData.includes('#EXTM3U') || isM3u8ByExt) {
+          const rewritten = rewriteM3u8Manifest(bodyData, streamUrl);
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.send(rewritten);
+        } else {
+          // If not starting with #EXTM3U, send as is
+          if (rawContentType) {
+            res.setHeader('Content-Type', rawContentType);
+          }
+          res.send(bodyData);
+        }
+      });
+      return;
+    }
+
+    // For non-M3U8 responses (e.g. .ts video chunks, binary streams)
+    // Inspect first chunk to see if it starts with #EXTM3U (some servers omit content-type and extension)
+    let isFirstChunk = true;
+    let isManifest = false;
+    let manifestBuffer = '';
+
+    proxyRes.on('data', chunk => {
+      if (isFirstChunk) {
+        isFirstChunk = false;
+        const chunkStr = chunk.slice(0, 10).toString('utf8');
+        if (chunkStr.startsWith('#EXTM3U')) {
+          isManifest = true;
+          manifestBuffer += chunk.toString('utf8');
+          return;
+        }
+
+        // Set proper content type for TS segments if missing
+        if (cleanPath.endsWith('.ts') && !rawContentType) {
+          res.setHeader('Content-Type', 'video/mp2t');
+        } else if (rawContentType) {
+          res.setHeader('Content-Type', rawContentType);
+        }
+      }
+
+      if (isManifest) {
+        manifestBuffer += chunk.toString('utf8');
+      } else {
+        res.write(chunk);
+      }
+    });
+
+    proxyRes.on('end', () => {
+      if (isManifest) {
+        const rewritten = rewriteM3u8Manifest(manifestBuffer, streamUrl);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.send(rewritten);
+      } else {
+        res.end();
+      }
+    });
 
     proxyRes.on('error', err => {
       logger.warn(`Proxy stream error: ${err.message}`);
